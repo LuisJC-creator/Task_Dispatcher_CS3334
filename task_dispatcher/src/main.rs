@@ -35,6 +35,10 @@ impl TaskQueue {
     pub fn pop(&mut self) -> Option<Task> {
         self.queue.pop_front()
     }
+    // Added a front method to allow workers to peek at the task cost
+    pub fn front(&self) -> Option<&Task> {
+        self.queue.front()
+    }
     pub fn len(&self) -> usize {
         self.queue.len()
     }
@@ -70,6 +74,22 @@ fn generate_tasks() -> Vec<Task> {
     tasks
 }
 
+fn print_results(monitor_data: &MonitorData, total_time_ms: u64) {
+    let snapshots = &monitor_data.snapshots;
+    let n = snapshots.len() as f64;
+
+    let avg_cpu = snapshots.iter().map(|s| s.cpu_consumption).sum::<f64>() / n;
+    let avg_workers = snapshots.iter().map(|s| s.active_workers as f64).sum::<f64>() / n;
+    let max_cpu = snapshots.iter().map(|s| s.cpu_consumption).fold(0.0f64, f64::max);
+
+    println!("=== Simulation Results ===");
+    println!("Total runtime:        {} ms", total_time_ms);
+    println!("Snapshots captured:   {}", snapshots.len());
+    println!("Avg CPU consumption:  {:.3}", avg_cpu);
+    println!("Max CPU consumption:  {:.3}", max_cpu);
+    println!("Avg active workers:   {:.2}", avg_workers);
+}
+
 fn main() {
     let start = std::time::Instant::now();
     let queue = Arc::new(Mutex::new(TaskQueue::new()));
@@ -100,24 +120,35 @@ fn main() {
         
         let handle = thread::spawn(move || {
             loop {
-                let task = queue_worker.lock().unwrap().pop();
+                let task = {
+                    let mut current_load = cpu_clone.lock().unwrap();
+                    let mut q = queue_worker.lock().unwrap();
+                    
+                    match q.front() {
+                        Some(t) if *current_load + t.cpu_cost <= 1.0 => {
+                            // take task if room
+                            *current_load += t.cpu_cost;
+                            q.pop()
+                        }
+                        _ => None, // no cpu or queue empty
+                    }
+                }; 
                 
                 match task {
                     Some(t) => {
-                        // Track worker start
                         active_clone.fetch_add(1, Ordering::SeqCst);
-                        *cpu_clone.lock().unwrap() += t.cpu_cost;
                         
                         thread::sleep(Duration::from_millis(t.duration_ms));
                         
-                        // Track worker finish
                         active_clone.fetch_sub(1, Ordering::SeqCst);
                         *cpu_clone.lock().unwrap() -= t.cpu_cost;
                     }
                     None => {
-                        if *done_worker.lock().unwrap() {
+                        // checking if done
+                        if *done_worker.lock().unwrap() && queue_worker.lock().unwrap().len() == 0 {
                             break;
                         }
+                        // waiting for tasks here
                         thread::sleep(Duration::from_millis(1));
                     }
                 }
@@ -160,5 +191,7 @@ fn main() {
     for h in worker_handles { h.join().unwrap(); }
     monitor_handle.join().unwrap();
 
-    println!("Simulation complete. Captured {} snapshots.", monitor_data.lock().unwrap().snapshots.len());
+    let total_time_ms = start.elapsed().as_millis() as u64;
+    let data = monitor_data.lock().unwrap();
+    print_results(&data, total_time_ms);
 }
