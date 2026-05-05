@@ -1,0 +1,6 @@
+=== Simulation Results ===
+Total runtime:        39087 ms
+Snapshots captured:   3859
+Avg CPU consumption:  89.676
+Max CPU consumption:  100.000
+Avg active workers:   5.14

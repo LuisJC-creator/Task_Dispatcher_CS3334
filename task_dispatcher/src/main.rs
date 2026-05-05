@@ -60,8 +60,8 @@ fn generate_tasks() -> Vec<Task> {
     for i in 0..1000 {
         let kind = if rng.gen_bool(0.7) { TaskKind::Io } else { TaskKind::Cpu };
         let cpu_cost = match kind {
-            TaskKind::Cpu => 0.35,
-            TaskKind::Io => 0.10,
+            TaskKind::Cpu => 35.0, 
+            TaskKind::Io => 10.0,  
         };
         tasks.push(Task {
             id: i,
@@ -121,11 +121,11 @@ fn main() {
         let handle = thread::spawn(move || {
             loop {
                 let task = {
-                    let mut current_load = cpu_clone.lock().unwrap();
+                    let mut current_load = cpu_clone.lock().unwrap(); // getting warned these two lines cause deadlock but not sure why
                     let mut q = queue_worker.lock().unwrap();
                     
                     match q.front() {
-                        Some(t) if *current_load + t.cpu_cost <= 1.0 => {
+                        Some(t) if *current_load + t.cpu_cost <= 100.0 => { // CHANGES HERE:
                             // take task if room
                             *current_load += t.cpu_cost;
                             q.pop()
