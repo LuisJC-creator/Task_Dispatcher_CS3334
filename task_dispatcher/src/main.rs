@@ -92,7 +92,8 @@ fn print_results(monitor_data: &MonitorData, total_time_ms: u64) {
 
 fn main() {
     let start = std::time::Instant::now();
-    let queue = Arc::new(Mutex::new(TaskQueue::new()));
+    let cpu_queue = Arc::new(Mutex::new(TaskQueue::new()));
+    let io_queue = Arc::new(Mutex::new(TaskQueue::new()));
     let done = Arc::new(Mutex::new(false));
     let monitor_data = Arc::new(Mutex::new(MonitorData { snapshots: Vec::new() }));
     let active_workers = Arc::new(AtomicUsize::new(0));
@@ -105,8 +106,11 @@ fn main() {
         let tasks = generate_tasks();
         for task in tasks {
             thread::sleep(Duration::from_millis(20));
-            queue_sender.lock().unwrap().push(task);
-        }
+                match task.kind {
+                TaskKind::Cpu => cpu_queue_sender.lock().unwrap().push(task),
+                TaskKind::Io => io_queue_sender.lock().unwrap().push(task),
+                }
+            }
         *done_sender.lock().unwrap() = true;
     });
     
@@ -121,18 +125,29 @@ fn main() {
         let handle = thread::spawn(move || {
             loop {
                 let task = {
-                    let mut current_load = cpu_clone.lock().unwrap(); // getting warned these two lines cause deadlock but not sure why
-                    let mut q = queue_worker.lock().unwrap();
-                    
-                    match q.front() {
-                        Some(t) if *current_load + t.cpu_cost <= 100.0 => { // CHANGES HERE:
-                            // take task if room
-                            *current_load += t.cpu_cost;
-                            q.pop()
-                        }
-                        _ => None, // no cpu or queue empty
+                    let mut load = cpu_clone.lock().unwrap();
+                    let mut cq = cpu_queue_worker.lock().unwrap();
+                    let mut iq = io_queue_worker.lock().unwrap();
+
+                    if *load + 35.0 <= 100.0 {
+                        if let Some(t) = cq.pop() {
+                            *load += t.cpu_cost;
+                            Some(t)
+                        } else if *load + 10.0 <= 100.0 {
+                            if let Some(t) = iq.pop() {
+                                *load += t.cpu_cost;
+                                Some(t)
+                            } else { None }
+                        } else { None }
+                    } else if *load + 10.0 <= 100.0 {
+                        if let Some(t) = iq.pop() {
+                            *load += t.cpu_cost;
+                            Some(t)
+                        } else { None }
+                    } else {
+                        None
                     }
-                }; 
+                };
                 
                 match task {
                     Some(t) => {
