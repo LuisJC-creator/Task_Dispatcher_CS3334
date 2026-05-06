@@ -35,10 +35,6 @@ impl TaskQueue {
     pub fn pop(&mut self) -> Option<Task> {
         self.queue.pop_front()
     }
-    // Added a front method to allow workers to peek at the task cost
-    pub fn front(&self) -> Option<&Task> {
-        self.queue.front()
-    }
     pub fn len(&self) -> usize {
         self.queue.len()
     }
@@ -82,9 +78,8 @@ fn print_results(monitor_data: &MonitorData, total_time_ms: u64) {
     let avg_workers = snapshots.iter().map(|s| s.active_workers as f64).sum::<f64>() / n;
     let max_cpu = snapshots.iter().map(|s| s.cpu_consumption).fold(0.0f64, f64::max);
 
-    println!("=== Simulation Results ===");
+    println!("=== Simulation Results (Partitioned Pools) ===");
     println!("Total runtime:        {} ms", total_time_ms);
-    println!("Snapshots captured:   {}", snapshots.len());
     println!("Avg CPU consumption:  {:.3}", avg_cpu);
     println!("Max CPU consumption:  {:.3}", max_cpu);
     println!("Avg active workers:   {:.2}", avg_workers);
@@ -100,111 +95,121 @@ fn main() {
     let cpu_load = Arc::new(Mutex::new(0.0f64));
 
     // --- Sender Thread ---
-    let cpu_queue_sender = Arc::clone(&cpu_queue);
-    let io_queue_sender = Arc::clone(&io_queue);
+    let cpu_q_sender = Arc::clone(&cpu_queue);
+    let io_q_sender = Arc::clone(&io_queue);
     let done_sender = Arc::clone(&done);
     let sender_handle = thread::spawn(move || {
         let tasks = generate_tasks();
         for task in tasks {
             thread::sleep(Duration::from_millis(20));
-                match task.kind {
-                TaskKind::Cpu => cpu_queue_sender.lock().unwrap().push(task),
-                TaskKind::Io => io_queue_sender.lock().unwrap().push(task),
-                }
+            match task.kind {
+                TaskKind::Cpu => cpu_q_sender.lock().unwrap().push(task),
+                TaskKind::Io => io_q_sender.lock().unwrap().push(task),
             }
+        }
         *done_sender.lock().unwrap() = true;
     });
     
-    // --- Worker Threads ---
     let mut worker_handles = Vec::new();
-    for _ in 0..8 {
-        let cpu_queue_worker = Arc::clone(&cpu_queue);
-        let io_queue_worker = Arc::clone(&io_queue);
-        let done_worker = Arc::clone(&done);
-        let active_clone = Arc::clone(&active_workers);
-        let cpu_clone = Arc::clone(&cpu_load);
+
+    // --- 2 Dedicated CPU Workers ---
+    for _ in 0..2 {
+        let q = Arc::clone(&cpu_queue);
+        let d = Arc::clone(&done);
+        let active = Arc::clone(&active_workers);
+        let load_mtx = Arc::clone(&cpu_load);
         
-        let handle = thread::spawn(move || {
+        worker_handles.push(thread::spawn(move || {
             loop {
                 let task = {
-                    let mut load = cpu_clone.lock().unwrap();
-                    let mut cq = cpu_queue_worker.lock().unwrap();
-                    let mut iq = io_queue_worker.lock().unwrap();
-
+                    let mut load = load_mtx.lock().unwrap();
                     if *load + 35.0 <= 100.0 {
-                        if let Some(t) = cq.pop() {
-                            *load += t.cpu_cost;
-                            Some(t)
-                        } else if *load + 10.0 <= 100.0 {
-                            if let Some(t) = iq.pop() {
-                                *load += t.cpu_cost;
-                                Some(t)
-                            } else { None }
-                        } else { None }
-                    } else if *load + 10.0 <= 100.0 {
-                        if let Some(t) = iq.pop() {
-                            *load += t.cpu_cost;
+                        let mut q_lock = q.lock().unwrap();
+                        if let Some(t) = q_lock.pop() {
+                            *load += 35.0;
                             Some(t)
                         } else { None }
-                    } else {
-                        None
-                    }
+                    } else { None }
                 };
-                
+
                 match task {
                     Some(t) => {
-                        active_clone.fetch_add(1, Ordering::SeqCst);
-                        
+                        active.fetch_add(1, Ordering::SeqCst);
                         thread::sleep(Duration::from_millis(t.duration_ms));
-                        
-                        active_clone.fetch_sub(1, Ordering::SeqCst);
-                        *cpu_clone.lock().unwrap() -= t.cpu_cost;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        *load_mtx.lock().unwrap() -= 35.0;
                     }
                     None => {
-                        // checking if done
-                        if *done_worker.lock().unwrap() && cpu_queue_worker.lock().unwrap().len() == 0 && io_queue_worker.lock().unwrap().len() == 0 {
-                            break;
-                        }
-                        // waiting for tasks here
+                        if *d.lock().unwrap() && q.lock().unwrap().len() == 0 { break; }
                         thread::sleep(Duration::from_millis(1));
                     }
                 }
             }
-        });
-        worker_handles.push(handle);
+        }));
+    }
+
+    // --- 6 Dedicated IO Workers ---
+    for _ in 0..6 {
+        let q = Arc::clone(&io_queue);
+        let d = Arc::clone(&done);
+        let active = Arc::clone(&active_workers);
+        let load_mtx = Arc::clone(&cpu_load);
+        
+        worker_handles.push(thread::spawn(move || {
+            loop {
+                let task = {
+                    let mut load = load_mtx.lock().unwrap();
+                    if *load + 10.0 <= 100.0 {
+                        let mut q_lock = q.lock().unwrap();
+                        if let Some(t) = q_lock.pop() {
+                            *load += 10.0;
+                            Some(t)
+                        } else { None }
+                    } else { None }
+                };
+
+                match task {
+                    Some(t) => {
+                        active.fetch_add(1, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(t.duration_ms));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        *load_mtx.lock().unwrap() -= 10.0;
+                    }
+                    None => {
+                        if *d.lock().unwrap() && q.lock().unwrap().len() == 0 { break; }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            }
+        }));
     }
 
     // --- Monitor Thread ---
-    let active_workers_monitor = Arc::clone(&active_workers);
-    let cpu_load_monitor = Arc::clone(&cpu_load);
-    let cpu_queue_monitor = Arc::clone(&cpu_queue);
-    let io_queue_monitor = Arc::clone(&io_queue);
-    let done_monitor = Arc::clone(&done);
-    let monitor_data_monitor = Arc::clone(&monitor_data);
+    let active_monitor = Arc::clone(&active_workers);
+    let load_monitor = Arc::clone(&cpu_load);
+    let cq_monitor = Arc::clone(&cpu_queue);
+    let iq_monitor = Arc::clone(&io_queue);
+    let d_monitor = Arc::clone(&done);
+    let data_monitor = Arc::clone(&monitor_data);
     
     let monitor_handle = thread::spawn(move || {
         loop {
-            let is_done = *done_monitor.lock().unwrap();
-            let is_empty = cpu_queue_monitor.lock().unwrap().len() == 0 && io_queue_monitor.lock().unwrap().len() == 0;
-            
-            if is_done && is_empty {
-                break;
-            }
+            let is_done = *d_monitor.lock().unwrap();
+            let is_empty = cq_monitor.lock().unwrap().len() == 0 && iq_monitor.lock().unwrap().len() == 0;
+            if is_done && is_empty { break; }
 
             {
-                let mut data = monitor_data_monitor.lock().unwrap();
+                let mut data = data_monitor.lock().unwrap();
                 data.snapshots.push(MonitorSnapshot {
                     time_ms: start.elapsed().as_millis() as u64,
-                    cpu_consumption: *cpu_load_monitor.lock().unwrap(),
-                    active_workers: active_workers_monitor.load(Ordering::SeqCst),
+                    cpu_consumption: *load_monitor.lock().unwrap(),
+                    active_workers: active_monitor.load(Ordering::SeqCst),
                 });
             }
-
             thread::sleep(Duration::from_millis(10));
         }
     });
     
-    // --- Joins ---
     sender_handle.join().unwrap();
     for h in worker_handles { h.join().unwrap(); }
     monitor_handle.join().unwrap();
