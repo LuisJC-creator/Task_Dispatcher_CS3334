@@ -100,7 +100,8 @@ fn main() {
     let cpu_load = Arc::new(Mutex::new(0.0f64));
 
     // --- Sender Thread ---
-    let queue_sender = Arc::clone(&queue);
+    let cpu_queue_sender = Arc::clone(&cpu_queue);
+    let io_queue_sender = Arc::clone(&io_queue);
     let done_sender = Arc::clone(&done);
     let sender_handle = thread::spawn(move || {
         let tasks = generate_tasks();
@@ -117,7 +118,8 @@ fn main() {
     // --- Worker Threads ---
     let mut worker_handles = Vec::new();
     for _ in 0..8 {
-        let queue_worker = Arc::clone(&queue);
+        let cpu_queue_worker = Arc::clone(&cpu_queue);
+        let io_queue_worker = Arc::clone(&io_queue);
         let done_worker = Arc::clone(&done);
         let active_clone = Arc::clone(&active_workers);
         let cpu_clone = Arc::clone(&cpu_load);
@@ -160,7 +162,7 @@ fn main() {
                     }
                     None => {
                         // checking if done
-                        if *done_worker.lock().unwrap() && queue_worker.lock().unwrap().len() == 0 {
+                        if *done_worker.lock().unwrap() && cpu_queue_worker.lock().unwrap().len() == 0 && io_queue_worker.lock().unwrap().len() == 0 {
                             break;
                         }
                         // waiting for tasks here
@@ -175,14 +177,15 @@ fn main() {
     // --- Monitor Thread ---
     let active_workers_monitor = Arc::clone(&active_workers);
     let cpu_load_monitor = Arc::clone(&cpu_load);
-    let queue_monitor = Arc::clone(&queue);
+    let cpu_queue_monitor = Arc::clone(&cpu_queue);
+    let io_queue_monitor = Arc::clone(&io_queue);
     let done_monitor = Arc::clone(&done);
     let monitor_data_monitor = Arc::clone(&monitor_data);
     
     let monitor_handle = thread::spawn(move || {
         loop {
             let is_done = *done_monitor.lock().unwrap();
-            let is_empty = queue_monitor.lock().unwrap().len() == 0;
+            let is_empty = cpu_queue_monitor.lock().unwrap().len() == 0 && io_queue_monitor.lock().unwrap().len() == 0;
             
             if is_done && is_empty {
                 break;
