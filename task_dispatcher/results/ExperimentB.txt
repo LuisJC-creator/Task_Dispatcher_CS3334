@@ -1,0 +1,8 @@
+=== ExpB: CPU-Preferring Dispatch ===
+Makespan (Total Runtime):    36343 ms
+Avg CPU Consumption:         96.23%
+Avg Active Workers:           5.51
+Avg Wait Time (All):       9461.40 ms
+Avg Wait Time (CPU):       4725.83 ms
+Avg Wait Time (IO):       11481.28 ms
+Max Wait Time:               17352 ms
